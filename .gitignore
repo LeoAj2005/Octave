@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# NPM Cache
+.npm/
+clean/
+_cacache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment Variables
+.env
+.env.local
+.env.*
+
+# Build Output
+dist/
+build/
+out/
+
+# WebOS Build Files
+.ipk
+*.ipk
+
+# IDE
+.vscode/
+.idea/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Git Bash / Temp
+tmp/
+temp/
+
+# Coverage
+coverage/
+
+# Cache
+.cache/
+.parcel-cache/
+
+# Lock files (optional)
+# package-lock.json
+# yarn.lock

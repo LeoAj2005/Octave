@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self' 'unsafe-inline';
+        connect-src 'self'
+            https://music.youtube.com
+            https://*.youtubei.googleapis.com
+            https://lrclib.net
+            https://ws.audioscrobbler.com
+            https://spotiflac.eclipsemusic.app
+            https://throbbing-shadow-ef90.nullbyteai01.workers.dev;
+        media-src 'self' blob: 
+            https://*.googlevideo.com 
+            https://throbbing-shadow-ef90.nullbyteai01.workers.dev;
+        img-src 'self' data: https://* http://*;
+        frame-ancestors 'none';
+        object-src 'none';
+    ">
+    <title>ArchiveTune TV</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+
+<body>
+
+    <div id="global-error-banner" role="alert" aria-live="assertive"></div>
+
+    <!-- Exit Confirmation Modal -->
+    <div id="exit-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h2>Exit ArchiveTune?</h2>
+            <p>Are you sure you want to shut down the application?</p>
+            <div class="modal-buttons">
+                <button id="btn-exit-confirm" class="focusable danger-btn" tabindex="0">Exit App</button>
+                <button id="btn-exit-cancel" class="focusable control-btn" tabindex="0">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="app-container">
+        <nav id="sidebar" role="navigation" aria-label="Main Navigation Menu">
+            <div class="logo">ArchiveTune</div>
+            <ul class="nav-links">
+                <li class="nav-item focusable" data-screen="home" tabindex="0" role="link">Home</li>
+                <li class="nav-item focusable" data-screen="search" tabindex="0" role="link">Search</li>
+                <li class="nav-item focusable" data-screen="player" tabindex="0" role="link">Now Playing</li>
+                <li class="nav-item focusable" data-screen="settings" tabindex="0" role="link">Settings</li>
+            </ul>
+        </nav>
+
+        <main id="content-area" role="main">
+            <!-- Home Screen -->
+            <section id="screen-home" class="screen active" aria-labelledby="home-title">
+                <h1 id="home-title" class="screen-title">Discover Tracks</h1>
+                <div class="horizontal-shelf" id="home-shelf"></div>
+            </section>
+
+            <!-- Search Screen -->
+            <section id="screen-search" class="screen" aria-labelledby="search-title">
+                <h1 id="search-title" class="screen-title">Search</h1>
+                <div class="search-input-wrapper">
+                    <input type="text" id="search-bar" class="focusable" tabindex="0"
+                        placeholder="Search across all catalogs..." aria-label="Search field">
+                </div>
+                <div id="search-status-message"></div>
+                <div class="grid-layout" id="search-results"></div>
+            </section>
+
+            <!-- Player Screen -->
+            <section id="screen-player" class="screen" aria-labelledby="player-title">
+                <h1 id="player-title" class="screen-title" style="display:none;">Audio Player</h1>
+                <div class="player-split">
+                    <div class="player-left">
+                        <div id="player-art-container">
+                            <div class="art-placeholder" role="img" aria-label="Album art placeholder">🎵</div>
+                        </div>
+                        <h2 id="player-track-title">Not Playing</h2>
+                        <h3 id="player-track-artist">Select a track to start playback</h3>
+                        <div class="player-controls">
+                            <button id="btn-prev" class="focusable control-btn" tabindex="0"
+                                aria-label="Previous Track">⏮</button>
+                            <button id="btn-play" class="focusable control-btn" tabindex="0"
+                                aria-label="Play or Pause">▶</button>
+                            <button id="btn-next" class="focusable control-btn" tabindex="0"
+                                aria-label="Next Track">⏭</button>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div id="progress-bar-fill"></div>
+                        </div>
+                    </div>
+                    <div class="player-right">
+                        <h2>Lyrics</h2>
+                        <div id="lyrics-container">
+                            <p class="lyrics-placeholder">No sync lines available.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Settings Screen -->
+            <section id="screen-settings" class="screen" aria-labelledby="settings-title">
+                <h1 id="settings-title" class="screen-title">Settings</h1>
+
+                <div class="settings-list">
+                    <div class="settings-item"
+                        style="margin-bottom: 50px; background: rgba(255,255,255,0.03); padding: 30px; border-radius: 20px;">
+                        <h2 style="font-size: 32px; margin-bottom: 10px;">Active Content Provider</h2>
+                        <p style="color: #888; font-size: 22px; margin-bottom: 25px;">Switch between audio streaming
+                            backends to bypass blocks.</p>
+
+                        <select id="source-provider-select" class="focusable" tabindex="0"
+                            style="width: 100%; padding: 20px; font-size: 26px; font-weight: 600; background: rgba(15,15,20,0.9); color: white; border: 2px solid #ff2a74; border-radius: 16px; outline: none; cursor: pointer;">
+                            <option value="spotiflac">SpotiFLAC Mode (Eclipse API)</option>
+                            <option value="youtube">YouTube Music (InnerTube)</option>
+                        </select>
+                    </div>
+
+                    <div class="settings-item"
+                        style="background: rgba(255,255,255,0.03); padding: 30px; border-radius: 20px;">
+                        <h2 style="font-size: 32px; margin-bottom: 10px;">System Maintenance</h2>
+                        <p style="color: #888; font-size: 22px; margin-bottom: 25px;">Clear local storage matrices,
+                            active user tokens, and profiles safely.</p>
+                        <button id="btn-factory-reset" class="focusable danger-btn" tabindex="0">Clear App Storage
+                            Data</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <audio id="native-audio-player" preload="auto"></audio>
+
+    <script src="js/security.js"></script>
+    <script src="js/navigation.js"></script>
+    <script src="js/remote.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+
+</html>

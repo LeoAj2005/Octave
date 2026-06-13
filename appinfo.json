@@ -1,0 +1,22 @@
+{
+  "id": "moe.rukamori.archivetune.tv",
+  "title": "ArchiveTune TV",
+  "vendor": "ArchiveTune Contributors",
+  "version": "1.0.0",
+
+  "type": "web",
+  "main": "index.html",
+
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "bgImage": "backgroundImage.png",
+  "splashBackground": "splashBackground.png",
+  "iconColor": "#121212",
+
+  "requiredPermissions": [
+    "internet"
+  ],
+
+  "disableBackHistoryAPI": true,
+  "trustLevel": "default"
+}
