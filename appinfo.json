@@ -1,7 +1,8 @@
+
 {
-  "id": "moe.rukamori.archivetune.tv",
-  "title": "ArchiveTune TV",
-  "vendor": "ArchiveTune Contributors",
+  "id": "com.leoaj2005.octave",
+  "title": "Octave TV",
+  "vendor": "LeoAj2005",
   "version": "1.0.0",
 
   "type": "web",
