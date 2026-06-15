@@ -1,0 +1,9 @@
+{
+  "services": [
+    {
+      "name": "com.leoaj2005.octave.service",
+      "executable": "bin/octave_engine",
+      "description": "Octave FLAC/streaming audio engine"
+    }
+  ]
+}

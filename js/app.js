@@ -1,29 +1,41 @@
 // ========== Global Utilities ==========
-function debugLog(level, rawMessageContent) {
-  const serializedLogMarker = `${new Date().toISOString()} [${level.toUpperCase()}] ${rawMessageContent}`;
-  console[level](serializedLogMarker);
-  try {
-    let executionLogStack = JSON.parse(
-      localStorage.getItem("at_runtime_telemetry") || "[]"
-    );
-    executionLogStack.push(serializedLogMarker);
-    if (executionLogStack.length > 50) {
-      executionLogStack.shift();
-    }
-    localStorage.setItem(
-      "at_runtime_telemetry",
-      JSON.stringify(executionLogStack)
-    );
-  } catch (e) {}
+// debugLog is provided by api.js (loaded first) – no duplication.
+
+// Safely validate an image URL to prevent attribute injection
+function safeImageUrl(url) {
+  if (!url) return "icon.png";
+  if (url.startsWith("https://") || url.startsWith("http://") || url.startsWith("/") || url.startsWith(".")) {
+    return url;
+  }
+  return "icon.png"; // reject data:, javascript:, etc.
 }
 
-const fetchWithTimeout = (promise, ms = 10000) =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Stream fetch timeout")), ms)
-    ),
-  ]);
+// Create a track card using DOM APIs (safe, no innerHTML injection)
+function createTrackCard(trackItem) {
+  const card = document.createElement("div");
+  card.className = "music-card focusable";
+  card.setAttribute("tabindex", "0");
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `${trackItem.title} by ${trackItem.artist}`);
+  card.setAttribute("data-id", trackItem.id);
+
+  const img = document.createElement("img");
+  img.src = safeImageUrl(trackItem.artwork);
+  img.loading = "lazy";
+  card.appendChild(img);
+
+  const titleDiv = document.createElement("div");
+  titleDiv.className = "track-title";
+  titleDiv.textContent = trackItem.title;
+  card.appendChild(titleDiv);
+
+  const artistDiv = document.createElement("div");
+  artistDiv.className = "track-artist";
+  artistDiv.textContent = trackItem.artist;
+  card.appendChild(artistDiv);
+
+  return card;
+}
 
 const ApplicationOrchestrator = {
   activeScreenContext: "home",
@@ -81,7 +93,6 @@ const ApplicationOrchestrator = {
       this.navigationHistoryStack.push(targetScreenName);
     }
 
-    // Hybrid double rAF + 20ms safety gap for slow TV hardware
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         setTimeout(() => {
@@ -220,35 +231,16 @@ const ApplicationOrchestrator = {
     }
 
     trackDataset.forEach((trackItem, index) => {
-      const cardAnchorNode = document.createElement("div");
-      cardAnchorNode.className = "music-card focusable";
-      cardAnchorNode.setAttribute("tabindex", "0");
-      cardAnchorNode.setAttribute("role", "button");
-      cardAnchorNode.setAttribute(
-        "aria-label",
-        `${trackItem.title} by ${trackItem.artist}`
-      );
-      cardAnchorNode.setAttribute("data-id", trackItem.id);
-
-      cardAnchorNode.innerHTML = `
-                <img src="${trackItem.artwork || "icon.png"}" loading="lazy">
-                <div class="track-title">${SecureCryptoSandbox.sanitizeOutputText(trackItem.title)}</div>
-                <div class="track-artist">${SecureCryptoSandbox.sanitizeOutputText(trackItem.artist)}</div>
-            `;
-
-      cardAnchorNode.addEventListener("click", () => {
-        // Lock BEFORE preUnlock to prevent remote interruption
+      const card = createTrackCard(trackItem);
+      card.addEventListener("click", () => {
         NativePlaybackCore.isFetchingStream = true;
-        NativePlaybackCore.preUnlockAudioEngine();
-
         this.activePlaylistQueue = [...trackDataset];
         this.activeQueueTrackIndex = index;
         this.persistCurrentQueueState();
         NativePlaybackCore.engageTrackStreaming(trackItem);
         this.routeToScreen("player");
       });
-
-      targetOutputGridNode.appendChild(cardAnchorNode);
+      targetOutputGridNode.appendChild(card);
     });
 
     if (NativePlaybackCore.currentlyActiveTrackContext) {
@@ -278,32 +270,16 @@ const ApplicationOrchestrator = {
     ];
 
     initialRecommends.forEach((stubTrack, index) => {
-      const cardNode = document.createElement("div");
-      cardNode.className = "music-card focusable";
-      cardNode.setAttribute("tabindex", "0");
-      cardNode.setAttribute("role", "button");
-      cardNode.setAttribute(
-        "aria-label",
-        `${stubTrack.title} by ${stubTrack.artist}`
-      );
-      cardNode.setAttribute("data-id", stubTrack.id);
-
-      cardNode.innerHTML = `
-                <img src="${stubTrack.artwork}">
-                <div class="track-title">${stubTrack.title}</div>
-                <div class="track-artist">${stubTrack.artist}</div>
-            `;
-
-      cardNode.addEventListener("click", () => {
+      const card = createTrackCard(stubTrack);
+      card.addEventListener("click", () => {
         NativePlaybackCore.isFetchingStream = true;
-        NativePlaybackCore.preUnlockAudioEngine();
         this.activePlaylistQueue = [...initialRecommends];
         this.activeQueueTrackIndex = index;
         this.persistCurrentQueueState();
         NativePlaybackCore.engageTrackStreaming(stubTrack);
         this.routeToScreen("player");
       });
-      homeShelfNode.appendChild(cardNode);
+      homeShelfNode.appendChild(card);
     });
   },
 
@@ -368,155 +344,115 @@ const ApplicationOrchestrator = {
   },
 };
 
+// ========== Native Playback Core (Luna Service Bridge) ==========
 const NativePlaybackCore = {
-  audioElementNodeTarget: null,
   currentlyActiveTrackContext: null,
-  isFetchingStream: false,            // lock to prevent remote interruption during fetch
-  playbackResetTimerReference: null,  // reference to the fallback timeout
-  activeStreamAbortController: null,  // aborts cross‑provider search + stream fetch
+  isFetchingStream: false,
+  activeStreamAbortController: null,
+  progressPollingInterval: null,
+  fallbackAttempted: false,   // prevents infinite fallback loop
 
   init() {
-    this.audioElementNodeTarget = document.getElementById(
-      "native-audio-player"
-    );
-    this.audioElementNodeTarget.addEventListener("timeupdate", () =>
-      this.refreshProgressBarState()
-    );
-    this.audioElementNodeTarget.addEventListener("ended", () =>
-      this.handleTrackAutoAdvance()
-    );
-
-    // Robust media error handler – suppresses harmless abort events,
-    // clears the fallback timer, and logs specific errors.
-    this.audioElementNodeTarget.addEventListener("error", () => {
-      const errorState = this.audioElementNodeTarget.error;
-
-      // User skip / track change – ignore completely
-      if (errorState && errorState.code === MediaError.MEDIA_ERR_ABORTED) {
-        debugLog("info", "[Decoder] Previous media socket cleanly dropped for incoming track.");
-        return;
-      }
-
-      // Cancel any pending fallback timeout to prevent race conditions
-      if (this.playbackResetTimerReference) {
-        clearTimeout(this.playbackResetTimerReference);
-        this.playbackResetTimerReference = null;
-      }
-
-      let diagnosticString = "Stream Error Context";
-      if (errorState) {
-        switch (errorState.code) {
-          case MediaError.MEDIA_ERR_NETWORK:
-            diagnosticString = "Network connection dropped.";
-            break;
-          case MediaError.MEDIA_ERR_DECODE:
-            diagnosticString = "Decoder processing error.";
-            break;
-          case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
-            diagnosticString = "MIME container unsupported by webOS player hardware.";
-            break;
-        }
-      }
-
-      debugLog("error", `[Hardware Element Fault]: ${diagnosticString} (Code ${errorState?.code})`);
-      this.resetPlaybackPipeline();
-    });
-
+    if (typeof webOS === 'undefined' || !webOS.service) {
+      console.warn("webOS Platform not found. Luna Service calls will fail in this environment.");
+    }
     this.wireControlPadButtons();
     this.setupNativeMediaSessionAPI();
   },
 
-  // Lock‑aware pre‑unlock: does nothing if a fetch is in progress or a source is already set
-  preUnlockAudioEngine() {
-    try {
-      if (!this.audioElementNodeTarget) return;
-
-      if (this.isFetchingStream || (this.audioElementNodeTarget.src && this.audioElementNodeTarget.src !== "")) {
-        return;
-      }
-
-      this.audioElementNodeTarget.pause();
-      this.audioElementNodeTarget.removeAttribute("src");
-      debugLog("info", "[PlaybackCore] Initial hardware thread primed.");
-    } catch (e) {
-      console.warn("[PlaybackCore] Pre-unlock bypassed:", e.message);
-    }
-  },
-
   setupNativeMediaSessionAPI() {
     if ("mediaSession" in navigator) {
-      navigator.mediaSession.setActionHandler("play", () => {
-        this.playAudioSafely();
-      });
-      navigator.mediaSession.setActionHandler("pause", () => {
-        this.audioElementNodeTarget.pause();
-        document.getElementById("btn-play").textContent = "▶";
-      });
-      navigator.mediaSession.setActionHandler("previoustrack", () =>
-        this.triggerQueueShift(-1)
-      );
-      navigator.mediaSession.setActionHandler("nexttrack", () =>
-        this.triggerQueueShift(1)
-      );
+      navigator.mediaSession.setActionHandler("play", () => this.resumePlayback());
+      navigator.mediaSession.setActionHandler("pause", () => this.pausePlayback());
+      navigator.mediaSession.setActionHandler("previoustrack", () => this.triggerQueueShift(-1));
+      navigator.mediaSession.setActionHandler("nexttrack", () => this.triggerQueueShift(1));
     }
   },
 
   wireControlPadButtons() {
     document.getElementById("btn-play").addEventListener("click", () => {
-      this.isFetchingStream = true;
-      this.preUnlockAudioEngine();
-      if (this.audioElementNodeTarget.paused) {
-        this.playAudioSafely();
+      const btn = document.getElementById("btn-play");
+      if (btn.textContent === "▶") {
+        this.resumePlayback();
       } else {
-        this.audioElementNodeTarget.pause();
-        document.getElementById("btn-play").textContent = "▶";
+        this.pausePlayback();
       }
-      this.isFetchingStream = false;
     });
 
     document.getElementById("btn-prev").addEventListener("click", () => {
-      this.isFetchingStream = true;
-      this.preUnlockAudioEngine();
       this.triggerQueueShift(-1);
     });
     document.getElementById("btn-next").addEventListener("click", () => {
-      this.isFetchingStream = true;
-      this.preUnlockAudioEngine();
       this.triggerQueueShift(1);
     });
   },
 
-  playAudioSafely() {
-    try {
-      if (!this.audioElementNodeTarget) return;
+  resumePlayback() {
+    if (!this.currentlyActiveTrackContext) return;
+    
+    webOS.service.request("luna://com.leoaj2005.octave.service", {
+      method: "resume",
+      parameters: {},
+      onSuccess: () => {
+        document.getElementById("btn-play").textContent = "⏸";
+        this.startProgressPolling();
+      },
+      onFailure: (err) => {
+        debugLog("error", `[Native Service] Resume failed: ${JSON.stringify(err)}`);
+        if (this.currentlyActiveTrackContext) {
+          this.engageTrackStreaming(this.currentlyActiveTrackContext);
+        }
+      }
+    });
+  },
 
-      this.audioElementNodeTarget
-        .play()
-        .then(() => {
-          document.getElementById("btn-play").textContent = "⏸";
-        })
-        .catch((err) => {
-          console.warn("Play blocked:", err.message);
-          document.getElementById("btn-play").textContent = "▶";
-          if (err.name === "NotAllowedError") {
-            ApplicationOrchestrator.showToastMessage("Press ▶ to start playback.");
-          } else {
-            ApplicationOrchestrator.showToastMessage(`Play error: ${err.message}`);
+  pausePlayback() {
+    webOS.service.request("luna://com.leoaj2005.octave.service", {
+      method: "pause",
+      parameters: {},
+      onSuccess: () => {
+        document.getElementById("btn-play").textContent = "▶";
+        this.stopProgressPolling();
+      },
+      onFailure: (err) => {
+        debugLog("error", `[Native Service] Pause failed: ${JSON.stringify(err)}`);
+      }
+    });
+  },
+
+  startProgressPolling() {
+    this.stopProgressPolling();
+    this.progressPollingInterval = setInterval(() => {
+      webOS.service.request("luna://com.leoaj2005.octave.service", {
+        method: "getPosition",
+        parameters: {},
+        onSuccess: (res) => {
+          if (res.duration > 0) {
+            const pct = (res.position / res.duration) * 100;
+            document.getElementById("progress-bar-fill").style.width = `${pct}%`;
+            
+            // Native EOS flag for precise auto-advance
+            if (res.ended) {
+              debugLog("info", "[EOS] Native reported end-of-stream.");
+              this.handleTrackAutoAdvance();
+            }
           }
-        });
-    } catch (fatalAudioError) {
-      console.error("Fatal audio boundary hit:", fatalAudioError);
-      ApplicationOrchestrator.showToastMessage("Audio system unstable, reload recommended.");
+        },
+        onFailure: () => {}
+      });
+    }, 1000);
+  },
+
+  stopProgressPolling() {
+    if (this.progressPollingInterval) {
+      clearInterval(this.progressPollingInterval);
+      this.progressPollingInterval = null;
     }
   },
 
-  // ──────────────────────────────────────────────
-  //  HYBRID ROUTER – SpotiFLAC metadata → YouTube audio
-  // ──────────────────────────────────────────────
-  async engageTrackStreaming(trackContextObject) {
+  async engageTrackStreaming(trackContextObject, isFallback = false) {
     if (!trackContextObject) return;
 
-    // Abort any previous cross‑provider pipeline
     if (this.activeStreamAbortController) {
       this.activeStreamAbortController.abort();
     }
@@ -526,51 +462,49 @@ const NativePlaybackCore = {
     this.isFetchingStream = true;
     debugLog("info", `[Playback Core] Resolving track pipeline for: "${trackContextObject.title}"`);
 
-    // Instant UI update
-    document.getElementById("player-track-title").textContent =
-      trackContextObject.title;
-    document.getElementById("player-track-artist").textContent =
-      trackContextObject.artist;
+    document.getElementById("player-track-title").textContent = trackContextObject.title;
+    document.getElementById("player-track-artist").textContent = trackContextObject.artist;
+    document.getElementById("progress-bar-fill").style.width = "0%";
+    document.getElementById("btn-play").textContent = "⏳";
 
     const artContainer = document.getElementById("player-art-container");
-    if (trackContextObject.artwork) {
-      artContainer.innerHTML = `<img src="${trackContextObject.artwork}">`;
+    const artUrl = safeImageUrl(trackContextObject.artwork);
+    if (artUrl && artUrl !== "icon.png") {
+      artContainer.innerHTML = `<img src="${artUrl}" alt="Album art">`;
     } else {
       artContainer.innerHTML = `<div class="art-placeholder" role="img">🎵</div>`;
     }
 
-    // Safe teardown of previous source
+    this.currentlyActiveTrackContext = trackContextObject;
+    let streamUrl = null;
+
     try {
-      if (this.audioElementNodeTarget) {
-        this.audioElementNodeTarget.pause();
-        this.audioElementNodeTarget.removeAttribute("src");
+      const result = await MediaAPI.getStreamUrl(trackContextObject.id);
+      if (result && result.url) {
+        streamUrl = result.url;
       }
-    } catch (e) {
-      console.warn(e);
+    } catch (resolveError) {
+      debugLog("warn", `Stream URL resolution failed: ${resolveError.message}`);
     }
 
-    let lookupStreamResponse = null;
-
-    try {
-      if (trackContextObject.provider === "spotiflac") {
-        debugLog("info", `[Hybrid Router]: Intercepting SpotiFLAC track. Sourcing cross‑match from InnerTube...`);
-
-        // Build a clean search query
-        const crossMatchQuery = `${trackContextObject.title} ${trackContextObject.artist}`;
-        const searchTargetUrl = `https://music.youtube.com/youtubei/v1/search?alt=json`;
-        const searchPayload = {
-          context: {
-            client: {
-              clientName: "WEB_REMIX",
-              clientVersion: "1.20250101.01.00",
-              hl: "en",
-              gl: "US",
-            },
+    // If primary provider fails and we haven't yet tried a fallback, attempt YouTube cross-match.
+    if (!streamUrl && !isFallback) {
+      debugLog("info", "Primary provider failed, attempting cross-provider YouTube fallback.");
+      const crossMatchQuery = `${trackContextObject.title} ${trackContextObject.artist}`;
+      const searchTargetUrl = `https://music.youtube.com/youtubei/v1/search?alt=json`;
+      const searchPayload = {
+        context: {
+          client: {
+            clientName: "WEB_REMIX",
+            clientVersion: "1.20250101.01.00",
+            hl: "en",
+            gl: "US",
           },
-          query: crossMatchQuery,
-        };
+        },
+        query: crossMatchQuery,
+      };
 
-        // Use the Cloudflare Worker to proxy the search request
+      try {
         const searchRes = await fetch(
           `${CF_PROXY}${encodeURIComponent(searchTargetUrl)}`,
           {
@@ -580,10 +514,7 @@ const NativePlaybackCore = {
             signal,
           }
         );
-
         const searchData = await searchRes.json();
-
-        // Extract the first matching video ID
         const structuralSection = searchData.contents?.contents?.find(
           (c) => c.musicShelfContents
         );
@@ -593,97 +524,62 @@ const NativePlaybackCore = {
         const extractedVideoId =
           firstMatchedTrack?.playlistItemData?.videoId;
 
-        if (!extractedVideoId) {
-          throw new Error(
-            "Cross‑provider track indexing failed to map to an operational source target."
-          );
+        if (extractedVideoId) {
+          const ytRes = await YouTubeProvider.getStream(extractedVideoId, signal);
+          if (ytRes && ytRes.url) {
+            streamUrl = ytRes.url;
+            debugLog("info", "Fallback YouTube stream acquired.");
+          }
         }
+      } catch (fallbackError) {
+        debugLog("error", `Cross-provider fallback error: ${fallbackError.message}`);
+      }
+    }
 
-        debugLog(
-          "info",
-          `[Hybrid Router]: Match established! Video ID -> ${extractedVideoId}. Extracting audio stream...`
-        );
-        lookupStreamResponse = await YouTubeProvider.getStream(
-          extractedVideoId,
-          signal
-        );
-      } else {
-        // Native YouTube track – use its own ID
-        lookupStreamResponse = await YouTubeProvider.getStream(
-          trackContextObject.id,
-          signal
-        );
-      }
-
-      if (lookupStreamResponse && lookupStreamResponse.error === "ABORTED") {
-        this.isFetchingStream = false;
-        this.activeStreamAbortController = null;
-        return;
-      }
-      if (!lookupStreamResponse || !lookupStreamResponse.url) {
-        throw new Error("Target audio link empty.");
-      }
-    } catch (pipelineGateError) {
-      if (pipelineGateError.name === "AbortError") {
-        this.isFetchingStream = false;
-        this.activeStreamAbortController = null;
-        return;
-      }
+    if (!streamUrl) {
       this.isFetchingStream = false;
       this.activeStreamAbortController = null;
       this.resetPlaybackPipeline();
-      debugLog("error", `[Pipeline Context Break]: ${pipelineGateError.message}`);
-      ApplicationOrchestrator.showToastMessage(
-        "Playback failed: Source lookup exhausted."
-      );
+      debugLog("error", "[Pipeline Context Break]: No stream URL found.");
+      ApplicationOrchestrator.showToastMessage("Playback failed: No valid audio source.");
       return;
     }
 
-    // Clean up locks and controllers
     this.isFetchingStream = false;
     this.activeStreamAbortController = null;
 
-    // Clear any leftover fallback timer from a previous track
-    if (this.playbackResetTimerReference) {
-      clearTimeout(this.playbackResetTimerReference);
-    }
+    this._callNativePlay(streamUrl);
+  },
 
-    // Mount the AAC/MP4 stream directly
-    this.audioElementNodeTarget.src = lookupStreamResponse.url;
-
-    let playTriggered = false;
-    this.playbackResetTimerReference = setTimeout(() => {
-      if (!playTriggered) {
-        playTriggered = true;
-        if (this.audioElementNodeTarget.readyState >= 2) {
-          this.playAudioSafely();
+  _callNativePlay(streamUrl) {
+    webOS.service.request("luna://com.leoaj2005.octave.service", {
+      method: "play",
+      parameters: { uri: streamUrl },
+      onSuccess: () => {
+        debugLog("info", "[Native Service] Playback acknowledged.");
+        document.getElementById("btn-play").textContent = "⏸";
+        this.startProgressPolling();
+        this.fallbackAttempted = false;
+      },
+      onFailure: (err) => {
+        debugLog("error", `[Native Service] Play failed: ${JSON.stringify(err)}`);
+        if (!this.fallbackAttempted && this.currentlyActiveTrackContext) {
+          this.fallbackAttempted = true;
+          debugLog("info", "Native play failed, triggering cross-provider fallback.");
+          this.engageTrackStreaming(this.currentlyActiveTrackContext, true);
         } else {
+          ApplicationOrchestrator.showToastMessage("Native Engine Error: Playback failed");
+          document.getElementById("btn-play").textContent = "▶";
           this.resetPlaybackPipeline();
-          ApplicationOrchestrator.showToastMessage(
-            "Stream initialization timed out."
-          );
         }
       }
-    }, 6500);
+    });
 
-    this.audioElementNodeTarget.addEventListener(
-      "canplay",
-      () => {
-        if (!playTriggered) {
-          playTriggered = true;
-          clearTimeout(this.playbackResetTimerReference);
-          this.playAudioSafely();
-        }
-      },
-      { once: true }
-    );
+    this.updateActiveCardHighlights(this.currentlyActiveTrackContext.id);
 
-    this.updateActiveCardHighlights(trackContextObject.id);
-
-    // Lyrics fetch (non‑blocking)
     ReverseEngineeredAPIConnector.queryLrcLibForLyrics(
-      trackContextObject.artist,
-      trackContextObject.title
+      this.currentlyActiveTrackContext.artist,
+      this.currentlyActiveTrackContext.title
     )
       .then((res) => this.injectLyricsToView(res?.data || null))
       .catch(() => this.injectLyricsToView(null));
@@ -691,14 +587,22 @@ const NativePlaybackCore = {
 
   resetPlaybackPipeline() {
     debugLog("info", "[PlaybackCore] Resetting pipeline.");
-    this.audioElementNodeTarget.removeAttribute("src");
-    this.audioElementNodeTarget.load();
+    this.stopProgressPolling();
+    
+    webOS.service.request("luna://com.leoaj2005.octave.service", {
+      method: "stop",
+      parameters: {},
+      onSuccess: () => {},
+      onFailure: () => {}
+    });
+
     document.getElementById("btn-play").textContent = "▶";
     document.getElementById("progress-bar-fill").style.width = "0%";
     document.getElementById("player-track-title").textContent = "Not Playing";
-    document.getElementById("player-track-artist").textContent =
-      "Select a track to start playback";
+    document.getElementById("player-track-artist").textContent = "Select a track to start playback";
     this.updateActiveCardHighlights(null);
+    this.currentlyActiveTrackContext = null;
+    this.fallbackAttempted = false;
   },
 
   updateActiveCardHighlights(activeId) {
@@ -715,42 +619,29 @@ const NativePlaybackCore = {
     const queueSize = ApplicationOrchestrator.activePlaylistQueue.length;
     if (queueSize === 0) return;
 
-    let targetIndex =
-      ApplicationOrchestrator.activeQueueTrackIndex + offsetDirectionStep;
+    let targetIndex = ApplicationOrchestrator.activeQueueTrackIndex + offsetDirectionStep;
     if (targetIndex >= queueSize) targetIndex = 0;
     if (targetIndex < 0) targetIndex = queueSize - 1;
 
     ApplicationOrchestrator.activeQueueTrackIndex = targetIndex;
     ApplicationOrchestrator.persistCurrentQueueState();
 
-    const nextTrackItem =
-      ApplicationOrchestrator.activePlaylistQueue[targetIndex];
+    const nextTrackItem = ApplicationOrchestrator.activePlaylistQueue[targetIndex];
     if (nextTrackItem) this.engageTrackStreaming(nextTrackItem);
   },
 
   handleTrackAutoAdvance() {
+    this.stopProgressPolling();
     this.triggerQueueShift(1);
   },
 
-  refreshProgressBarState() {
-    if (!this.audioElementNodeTarget.duration) return;
-    const completePercentageDistance =
-      (this.audioElementNodeTarget.currentTime /
-        this.audioElementNodeTarget.duration) *
-      100;
-    document.getElementById("progress-bar-fill").style.width =
-      `${completePercentageDistance}%`;
-  },
-
   injectLyricsToView(lyricsDataStructure) {
-    const outputLyricsContainerNode =
-      document.getElementById("lyrics-container");
+    const outputLyricsContainerNode = document.getElementById("lyrics-container");
     outputLyricsContainerNode.innerHTML = "";
     outputLyricsContainerNode.scrollTop = 0;
 
     if (!lyricsDataStructure?.plainTextLines) {
-      outputLyricsContainerNode.textContent =
-        "Instrumental or Plain lyrics matching missing.";
+      outputLyricsContainerNode.textContent = "Instrumental or Plain lyrics matching missing.";
       return;
     }
 

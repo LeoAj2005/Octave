@@ -12,7 +12,7 @@ class PlaybackError extends Error {
   }
 }
 
-// Shared lightweight debug logger
+// Shared lightweight debug logger (global, used by app.js)
 function debugLog(level, msg) {
   const entry = `${new Date().toISOString()} [${level.toUpperCase()}] ${msg}`;
   console[level](entry);
@@ -24,12 +24,8 @@ function debugLog(level, msg) {
   } catch (e) {}
 }
 
-// Cloudflare Worker proxy base URL (used for metadata *and* audio streaming)
 const CF_PROXY = "https://throbbing-shadow-ef90.nullbyteai01.workers.dev/?url=";
 
-/**
- * Centralized proxy fetch with timeout, logging, and error extraction.
- */
 async function fetchWithEdgeProxy(targetUrl, signal = null) {
   const proxyUrl = `${CF_PROXY}${encodeURIComponent(targetUrl)}`;
   const internalController = new AbortController();
@@ -44,14 +40,62 @@ async function fetchWithEdgeProxy(targetUrl, signal = null) {
     console.log(`[Edge Response]: ${response.status} ${response.statusText}`);
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("[Proxy Rejection Frame]:", errorBody);
+      let errorBody = '';
+      try { errorBody = await response.text(); } catch (e) {}
+      console.error("[Proxy Rejection Frame]:", errorBody || response.statusText);
       throw new APIError(`Proxy fault (HTTP ${response.status})`, response.status);
     }
-    return await response.json();
+
+    let json;
+    try {
+      json = await response.json();
+    } catch (parseError) {
+      console.error("[Proxy JSON Parse Error]:", parseError);
+      throw new APIError("Invalid JSON response from proxy", 502);
+    }
+    return json;
   } catch (error) {
     if (error.name === "AbortError") {
       console.warn(`[Network Timeout] Request to ${targetUrl} exceeded 10s.`);
+      throw new Error("Network latency threshold breached.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Proxy fetch for POST requests (e.g., YouTube InnerTube player).
+ * The Cloudflare Worker must be updated to accept POST requests
+ * and return a JSON object containing a "streamUrl" property.
+ */
+async function fetchWithEdgeProxyPost(targetUrl, body, signal = null) {
+  const proxyUrl = `${CF_PROXY}${encodeURIComponent(targetUrl)}`;
+  const internalController = new AbortController();
+  const timeoutId = setTimeout(() => internalController.abort(), 10000);
+
+  try {
+    console.log(`[Edge POST Routing]: ${targetUrl}`);
+    const response = await fetch(proxyUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: signal || internalController.signal,
+    });
+    console.log(`[Edge POST Response]: ${response.status}`);
+
+    if (!response.ok) {
+      let errorBody = '';
+      try { errorBody = await response.text(); } catch (e) {}
+      console.error("[Proxy POST Rejection]:", errorBody);
+      throw new APIError(`Proxy POST fault (HTTP ${response.status})`, response.status);
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      console.warn(`[Network Timeout] POST to ${targetUrl} exceeded 10s.`);
       throw new Error("Network latency threshold breached.");
     }
     throw error;
@@ -76,6 +120,9 @@ const YouTubeProvider = {
       },
     };
   },
+
+  // Search still uses direct POST; CORS may be an issue on some devices.
+  // In production, route through the worker.
   async search(query) {
     try {
       const res = await fetch(
@@ -147,7 +194,21 @@ const YouTubeProvider = {
         playbackContext: { contentPlaybackContext: { signatureTimestamp: 20400 } },
       };
 
-      const res = await fetch(
+      // Route through the worker to resolve ciphered signatures.
+      const result = await fetchWithEdgeProxyPost(
+        "https://music.youtube.com/youtubei/v1/player?alt=json",
+        payload,
+        signal
+      );
+
+      if (result && result.streamUrl) {
+        debugLog("info", "[YouTube] Stream URL resolved via proxy.");
+        return { url: result.streamUrl };
+      }
+
+      // Fallback: direct API call + local cipher extraction (may fail).
+      debugLog("warn", "[YouTube] Proxy did not provide streamUrl, attempting local extraction.");
+      const directRes = await fetch(
         "https://music.youtube.com/youtubei/v1/player?alt=json",
         {
           method: "POST",
@@ -157,14 +218,13 @@ const YouTubeProvider = {
             "X-YouTube-Client-Version": "1.20250101.01.00",
           },
           body: JSON.stringify(payload),
-          signal: signal,
+          signal,
         }
       );
+      if (!directRes.ok)
+        throw new APIError(`YouTube API refused (HTTP ${directRes.status})`, directRes.status);
 
-      if (!res.ok)
-        throw new APIError(`YouTube API refused (HTTP ${res.status})`, res.status);
-
-      const data = await res.json();
+      const data = await directRes.json();
       if (data.playabilityStatus?.status === "UNPLAYABLE") {
         throw new PlaybackError(data.playabilityStatus.reason || "Track restricted.");
       }
@@ -177,20 +237,14 @@ const YouTubeProvider = {
         throw new PlaybackError("No available audio tracks.");
 
       const bestStream = audioFormats.find((f) => f.url) || audioFormats[0];
+      if (bestStream.url) return { url: bestStream.url };
 
-      if (bestStream.url) {
-        debugLog("info", "[YouTube] Direct stream URL acquired.");
-        return { url: bestStream.url };
-      }
-
-      // Cipher fallback
       const cipher = bestStream.signatureCipher || bestStream.cipher;
       if (!cipher) throw new PlaybackError("Stream signature format unhandled.");
       const params = new URLSearchParams(cipher);
       const url = `${params.get("url")}&${params.get("sp") || "sig"}=${params.get("s")}`;
-      debugLog("info", "[YouTube] Cipher fallback URL built.");
+      debugLog("info", "[YouTube] Cipher fallback URL built (may be invalid).");
       return { url };
-
     } catch (error) {
       if (error.name === "AbortError") {
         debugLog("info", "[YouTube] Stream request aborted by user.");
@@ -204,7 +258,6 @@ const YouTubeProvider = {
 
 /**
  * MODULE 2: SpotiFLAC (Eclipse API) Provider Engine
- * Metadata via Worker, audio streams via Worker to preserve CORS & Range headers.
  */
 const SpotiFlacProvider = {
   baseUrl: "https://spotiflac.eclipsemusic.app/a3990bb42069a915",
@@ -212,13 +265,9 @@ const SpotiFlacProvider = {
     try {
       const targetUrl = `${this.baseUrl}/search?q=${encodeURIComponent(query)}&type=track`;
       const data = await fetchWithEdgeProxy(targetUrl);
-
-      // Diagnostic dump – reveals exact JSON structure
       console.warn("[SpotiFLAC Raw JSON Dump]:", JSON.stringify(data));
 
-      // Precise mapping for known SpotiFLAC API shape
       const rawList = data.tracks || [];
-
       const tracks = rawList.map((t) => ({
         id: t.id ? String(t.id) : "",
         title: t.title || "Unknown Title",
@@ -234,11 +283,11 @@ const SpotiFlacProvider = {
     }
   },
 
-  // Standardized stream URL – clean target string via Edge Proxy
   async getStream(id, signal) {
+    // signal unused but kept for interface compatibility
     try {
       const streamUrl = `${this.baseUrl}/stream?id=${id}`;
-      debugLog("info", `[SpotiFLAC Core]: Routing target resource string through Edge Proxy.`);
+      debugLog("info", `[SpotiFLAC Core]: Routing through Edge Proxy.`);
       return { url: `${CF_PROXY}${encodeURIComponent(streamUrl)}` };
     } catch (e) {
       if (e.name === "AbortError") return { error: "ABORTED" };
@@ -251,7 +300,7 @@ const SpotiFlacProvider = {
  * MASTER ROUTER CENTRAL ENGINE CONTROL: MediaAPI
  */
 const MediaAPI = {
-  activeProvider: "spotiflac",   // Start with SpotiFLAC
+  activeProvider: "spotiflac",
   activeStreamController: null,
 
   setActiveProvider(provider) {
@@ -261,7 +310,6 @@ const MediaAPI = {
   async search(query) {
     if (this.activeProvider === "spotiflac")
       return await SpotiFlacProvider.search(query);
-    // YouTube fallback
     return await YouTubeProvider.search(query);
   },
 
