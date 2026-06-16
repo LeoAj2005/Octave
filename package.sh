@@ -1,38 +1,82 @@
 #!/bin/bash
-# Dedicated Security Bundling Matrix for ArchiveTune TV Wrapper Destination File Output
+
+# -----------------------------------------------------------------------------
+#                     Dynamic webOS Packaging Script
+# -----------------------------------------------------------------------------
+
 TARGET_APP_CONTEXT_DIRECTORY="."
 BUILD_DESTINATION_FOLDER="./dist"
 APP_MANIFEST_FILE="appinfo.json"
 
 echo "========================================================================"
-echo "          ArchiveTune webOS Target Packaging Verification Node          "
+echo "           Advanced webOS Packaging & Verification System              "
 echo "========================================================================"
 
 # 1. Validate manifest presence
 if [ ! -f "$APP_MANIFEST_FILE" ]; then
-    echo "[-] Execution Aborted: Path file context metadata manifest [appinfo.json] missing."
+    echo "❌ Execution Aborted: App manifest file '$APP_MANIFEST_FILE' not found."
+    echo "   Make sure you are running this from the root of your project directory."
     exit 1
 fi
 
 # 2. Check for CLI tooling availability
 if ! command -v ares-package &> /dev/null; then
-    echo "[-] Execution Aborted: LG webOS SDK tools ('ares-package') missing in shell environment paths."
+    echo "❌ Execution Aborted: The webOS CLI tool 'ares-package' was not found."
+    echo "   Ensure your Docker image was built correctly with the CLI installed."
     exit 1
 fi
 
-# 3. Reset distribution folder
+# 3. Dynamically extract app ID and version from appinfo.json
+# We use 'jq', a lightweight and flexible command-line JSON processor.
+# If 'jq' is not found, this script will exit with a helpful message.
+if ! command -v jq &> /dev/null; then
+    echo "❌ Execution Aborted: 'jq' is required for dynamic versioning."
+    echo "   Please ensure your Dockerfile includes 'apt-get install -y jq'."
+    exit 1
+fi
+
+# Read ID and version from the manifest
+APP_ID=$(jq -r '.id' "$APP_MANIFEST_FILE")
+APP_VERSION=$(jq -r '.version' "$APP_MANIFEST_FILE")
+
+# Verify that jq successfully extracted the values
+if [ -z "$APP_ID" ] || [ "$APP_ID" == "null" ]; then
+    echo "❌ Execution Aborted: Could not read app 'id' from '$APP_MANIFEST_FILE'."
+    exit 1
+fi
+
+if [ -z "$APP_VERSION" ] || [ "$APP_VERSION" == "null" ]; then
+    echo "❌ Execution Aborted: Could not read app 'version' from '$APP_MANIFEST_FILE'."
+    exit 1
+fi
+
+echo "🔍 Found App: $APP_ID, Version: $APP_VERSION"
+
+# Construct the expected output filename dynamically
+EXPECTED_IPK_FILENAME="${APP_ID}_${APP_VERSION}_all.ipk"
+EXPECTED_IPK_PATH="${BUILD_DESTINATION_FOLDER}/${EXPECTED_IPK_FILENAME}"
+
+# 4. Reset distribution folder
+echo "🧹 Cleaning build directory..."
 rm -rf "$BUILD_DESTINATION_FOLDER"
 mkdir -p "$BUILD_DESTINATION_FOLDER"
 
-echo "[+] Executing secure validation packaging layout maps..."
-# Added -n to bypass the broken, legacy minifier tool on modern JS code blocks
-ares-package . -o "$BUILD_DESTINATION_FOLDER" -n
+# 5. Execute the packaging command
+echo "🔨 Executing secure packaging process (with minifier bypass)..."
+ares-package "$TARGET_APP_CONTEXT_DIRECTORY" -o "$BUILD_DESTINATION_FOLDER" -n
 
-# 4. Failsafe check: Handle the rimraf crash gracefully. If the IPK exists, the build is valid!
-if [ -f "$BUILD_DESTINATION_FOLDER/moe.rukamori.archivetune.tv_1.0.0_all.ipk" ]; then
-    echo "[+] SUCCESS: WebOS binary deployed inside $BUILD_DESTINATION_FOLDER directory context."
+# 6. Final validation check
+if [ -f "$EXPECTED_IPK_PATH" ]; then
+    echo "✅ SUCCESS: Build artifact deployed to:"
+    echo "   -> $EXPECTED_IPK_PATH"
+    echo ""
+    echo "   IPK Details:"
+    ls -lh "$EXPECTED_IPK_PATH"
     exit 0
 else
-    echo "[-] Packaging process failed: IPK bundle was not found."
+    echo "❌ FAILURE: Packaging process did not produce the expected output."
+    echo "   Expected file: $EXPECTED_IPK_FILENAME"
+    echo "   Build folder contents:"
+    ls -R "$BUILD_DESTINATION_FOLDER"
     exit 1
 fi

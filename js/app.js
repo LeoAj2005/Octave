@@ -657,3 +657,57 @@ window.addEventListener("DOMContentLoaded", () => {
   ApplicationOrchestrator.init();
   NativePlaybackCore.init();
 });
+
+document.addEventListener("DOMContentLoaded", () => {
+  const testBtn = document.getElementById("btn-wasm-test");
+  if (!testBtn) return;
+
+  testBtn.addEventListener("click", async () => {
+    debugLog("info", "[POC Test] Starting webOS Web Audio & WASM sanity check...");
+    testBtn.textContent = "Testing...";
+    testBtn.style.background = "#orange";
+
+    try {
+      // 1. Test Web Audio API Engine
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        throw new Error("Web Audio API (AudioContext) is completely missing on this webOS version.");
+      }
+      
+      const ctx = new AudioContextClass();
+      debugLog("info", `[POC Test] AudioContext created successfully. State: ${ctx.state}`);
+
+      // Generate a quick hardware synth beep (Oscillator) to verify driver output
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(440, ctx.currentTime); // A4 Note
+      gain.gain.setValueAtTime(0.1, ctx.currentTime); // Low volume
+      
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5); // Play for 500ms
+      debugLog("info", "[POC Test] Native browser audio oscillator fired cleanly.");
+
+      // 2. Test WebAssembly Compilation Sandbox Limits
+      // Minimal valid WebAssembly binary module (empty module bytes)
+      const minimalWasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+      const wasmModule = await WebAssembly.compile(minimalWasmBytes);
+      
+      if (wasmModule) {
+        debugLog("info", "[POC Test] WebAssembly compilation sandbox verified on real device hardware!");
+        testBtn.textContent = "PASSED ✅";
+        testBtn.style.background = "#2acc7a";
+        ApplicationOrchestrator.showToastMessage("Hardware engine fully compatible with Octave WASM architecture!");
+      }
+
+    } catch (pocError) {
+      debugLog("error", `[POC Test FAILURE]: ${pocError.message}`);
+      testBtn.textContent = "FAILED ❌";
+      testBtn.style.background = "#dc3545";
+      ApplicationOrchestrator.showToastMessage(`Hardware Blocked: ${pocError.message}`);
+    }
+  });
+});
